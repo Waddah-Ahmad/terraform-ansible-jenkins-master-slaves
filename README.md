@@ -1,0 +1,1 @@
+terraform code to run 3 ec2 instances and install ansible to configure them for master-nodes architecture for jenkins server through ssh keys then installs plugin Jcaac to apply the configuration to the master node
