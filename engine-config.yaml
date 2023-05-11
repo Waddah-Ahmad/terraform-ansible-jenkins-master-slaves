@@ -1,0 +1,240 @@
+---
+# cofigure ansible engine and nodes with users and access
+
+- hosts: all
+  become: true
+  vars:
+    devops_public_key: ""
+  tasks:
+    - name: Set Hostname
+      hostname:
+        name: "{{ inventory_hostname }}"
+
+    #- name: Install Packages
+    #  yum:
+    #    name:
+    #      - vim
+    #    state: present
+  
+    - name: Create .ssh if not exist
+      file:
+        path: /home/devops/.ssh
+        state: directory
+        owner: devops
+        group: devops
+        mode: 0700
+
+    #- name: Create authorized_keys if not exist
+    #  copy:
+    #    dest: /home/devops/.ssh/authorized_keys
+    #    content: ""
+    #    force: no
+    #    owner: devops 
+    #    group: devops
+    #    mode: '0600'
+
+    #- name: Copy Authorized keys to devops user
+    #  blockinfile:
+    #    path: /home/devops/.ssh/authorized_keys
+    #    block:  "{{ lookup('file', '/home/ec2-user/.ssh/authorized_keys') }}"
+    - name: Copy Sample Inventory to devops home
+      copy:
+        src: '/home/ec2-user/inventory'
+        dest: "/home/devops/inventory"
+        mode: '0755'
+        owner: devops
+        group: devops
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy ansible.cfg to devops home
+      copy:
+        src: '/home/ec2-user/ansible.cfg'
+        dest: "/home/devops/ansible.cfg"
+        mode: '0755'
+        owner: devops
+        group: devops
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Update /etc/hosts
+      lineinfile:
+        line: "{{ hostvars[item]['ansible_default_ipv4']['address'] }} {{ item }}"
+        path: /etc/hosts
+      loop: "{{ groups['all'] }}"
+      #ignore_errors: yes
+
+    - name: Generate an OpenSSH keypair 2048 bits
+      openssh_keypair:
+        path: '/home/ec2-user/.ssh/id_rsa'
+        size: 2048
+        force: True
+        owner: ec2-user
+        group: ec2-user
+      delegate_to: ansible-engine
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy SSH Private Key to devops user
+      copy:
+        src: "/home/ec2-user/.ssh/id_rsa"
+        dest: "/home/devops/.ssh/id_rsa"
+        owner: devops
+        group: devops
+        mode: '0600'
+        force: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy SSH Public Key to devops user
+      copy:
+        src: "/home/ec2-user/.ssh/id_rsa.pub"
+        dest: "/home/devops/.ssh/id_rsa.pub"
+        owner: devops
+        group: devops
+        mode: '0644'
+        force: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Fetch the Public Key Content
+      become: false
+      set_fact:
+        devops_public_key: "{{ lookup('file', '/home/ec2-user/.ssh/id_rsa.pub') }}"
+        host_machine_public_key: "{{ lookup('file', '/home/ec2-user/.ssh/authorized_keys') }}"
+      delegate_to: ansible-engine 
+      when: inventory_hostname == 'ansible-engine'    
+
+    - name: Add Host machine public key to devops user
+      authorized_key:
+        user: devops
+        state: present
+        key: "{{ hostvars['ansible-engine']['host_machine_public_key'] }}"
+
+    - name: Add Ansible Engine keys to authorized_keys of nodes
+      authorized_key:
+        user: devops
+        state: present
+        key: "{{ hostvars['ansible-engine']['devops_public_key'] }}"
+
+    - name: Disable password login
+      lineinfile: 
+        dest: /etc/ssh/sshd_config 
+        regexp: "^PasswordAuthentication" 
+        line: "PasswordAuthentication no" 
+        state: present
+
+    - name: Restart sshd
+      service:
+        name: sshd
+        state: restarted
+
+    - name: Clean up inventory in devops home
+      lineinfile: 
+        dest: /home/devops/inventory
+        regexp: "^ansible_ssh_extra_args"
+        state: absent
+      when: inventory_hostname == 'ansible-engine'    
+      
+    - name: Amend inventory in devops home
+      lineinfile: 
+        dest: /home/devops/inventory
+        line: "ansible_ssh_extra_args=' -o StrictHostKeyChecking=no '" 
+        state: present
+        insertafter: "ansible_connection=ssh"
+      when: inventory_hostname == 'ansible-engine'
+
+
+    - name: Install EPEL repository
+      command: amazon-linux-extras install -y java-openjdk11
+
+    - name: Import Jenkins GPG key
+      command: wget -O /etc/yum.repos.d/jenkins.repo http://pkg.jenkins-ci.org/redhat/jenkins.repo
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Add Jenkins repository
+      yum_repository:
+        name: jenkins
+        description: Jenkins stable repository
+        baseurl: https://pkg.jenkins.io/redhat-stable
+        gpgcheck: yes
+        gpgkey: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+        enabled: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Install Jenkins
+      yum:
+        name: jenkins
+        state: present
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Start Jenkins service
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Create .ssh if not exist in jnekins home
+      file:
+        path: /var/lib/jenkins/.ssh
+        state: directory
+        mode: 0600
+        owner: jenkins
+        group: jenkins
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy SSH Private Key to jenkins user
+      copy:
+        src: "/home/ec2-user/.ssh/id_rsa"
+        dest: "/var/lib/jenkins/.ssh/id_rsa"
+        mode: '0600'
+        force: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy SSH Public Key to jenkins user
+      copy:
+        src: "/home/ec2-user/.ssh/id_rsa.pub"
+        dest: "/var/lib/jenkins/.ssh/id_rsa.pub"
+        mode: '0644'
+        force: yes
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: jenkins pass
+      command: cat /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_pass_output
+      when: inventory_hostname == 'ansible-engine'
+    - name: jenkins pass
+      set_fact:
+        pass_jenkins: "{{ jenkins_pass_output.stdout }}"
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Set environment variable from file contents
+      debug: 
+        var: pass_jenkins
+      when: inventory_hostname == 'ansible-engine'
+    - name: Set environment variable from file contents
+      command: chdir=/home/ec2-user/ {{ item }}
+      with_items:
+      - wget http://127.0.0.1:8080/jnlpJars/jenkins-cli.jar 
+      - java -jar jenkins-cli.jar -s http://127.0.0.1:8080/ -auth admin:"{{ pass_jenkins }}" install-plugin configuration-as-code 
+      when: inventory_hostname == 'ansible-engine'    
+
+    - name: jenkins root
+      lineinfile: 
+        dest: /etc/sysconfig/jenkins
+        regexp: "^JENKINS_USER=" 
+        line: "JENKINS_USER=root" 
+        state: present
+      when: inventory_hostname == 'ansible-engine'  
+
+    - name: Restart Jenkins
+      systemd:
+        name: jenkins
+        state: restarted
+      when: inventory_hostname == 'ansible-engine'
+
+    - name: Copy SSH Public Key to devops user
+      copy:
+        src: "/home/ec2-user/jenkins.yaml"
+        dest: "/var/lib/jenkins/jenkins.yaml"
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+        force: yes
+      when: inventory_hostname == 'ansible-engine'
